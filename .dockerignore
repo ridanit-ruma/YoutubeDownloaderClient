@@ -1,0 +1,34 @@
+# Dependencies (reinstalled inside Docker)
+node_modules/
+
+# Build output (generated inside Docker)
+dist/
+dist-ssr/
+
+# Git
+.git/
+.gitignore
+
+# Environment variables (never bake into image)
+.env
+.env.*
+
+# Editor / IDE
+.vscode/
+.idea/
+.opencode/
+*.sw?
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local dev artifacts
+*.local
+
+# CI/CD and K8s manifests (not needed in image)
+.github/
+k8s/
+
+# Docs
+README.md
