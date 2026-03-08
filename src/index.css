@@ -375,12 +375,17 @@ body {
   color: #fff;
   font-size: 0.9rem;
   font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
   white-space: nowrap;
   transition: opacity 0.2s, transform 0.15s, box-shadow 0.2s;
   box-shadow: 0 4px 16px rgba(124,58,237,0.3);
   flex-shrink: 0;
 }
+.enter-btn-icon { display: none; }
+.enter-btn-text { display: inline; }
 .enter-btn:hover:not(:disabled) {
   opacity: 0.9;
   transform: translateY(-1px);
@@ -1006,15 +1011,12 @@ body {
   .hero { padding-top: 16px; gap: 6px; }
   .hero-title { font-size: 1.5rem; }
 
-  /* Input row — textarea fills, Add button compact (not full width) */
-  .input-row { flex-direction: column; gap: 8px; align-items: stretch; }
+  /* Input row — always horizontal, Add button is compact icon */
+  .input-row { flex-direction: row; gap: 8px; align-items: flex-start; }
   .input-wrap { border-radius: 12px; flex: 1; }
-  .enter-btn {
-    align-self: flex-end;
-    padding: 10px 22px;
-    border-radius: 12px;
-    font-size: 0.85rem;
-  }
+  .enter-btn { width: 44px; height: 44px; padding: 0; border-radius: 12px; flex-shrink: 0; align-self: flex-start; }
+  .enter-btn-text { display: none; }
+  .enter-btn-icon { display: flex; }
 
   /* Download list */
   .dl-list { gap: 8px; }
