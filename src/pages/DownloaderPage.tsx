@@ -11,6 +11,73 @@ const APP_VERSION = '0.1.0'
 
 type DownloadStatus = 'idle' | 'downloading' | 'converting' | 'done' | 'error'
 type Bitrate = '64' | '128' | '192' | '320'
+type FormatId = 'mp3' | 'm4a' | 'ogg' | 'opus' | 'flac' | 'wav'
+
+interface FormatOption {
+  id: FormatId
+  label: string        // display name
+  ext: string          // file extension
+  mime: string         // blob MIME type
+  lossless: boolean    // if true, bitrate selector is hidden
+  // FFmpeg args builder — receives bitrate string (ignored for lossless)
+  args: (bitrate: string) => string[]
+}
+
+const FORMATS: FormatOption[] = [
+  {
+    id: 'mp3',
+    label: 'MP3',
+    ext: 'mp3',
+    mime: 'audio/mpeg',
+    lossless: false,
+    args: (b) => ['-c:a', 'libmp3lame', '-b:a', `${b}k`, '-f', 'mp3'],
+  },
+  {
+    id: 'm4a',
+    label: 'AAC (M4A)',
+    ext: 'm4a',
+    mime: 'audio/mp4',
+    lossless: false,
+    // ipod muxer = M4A container (AAC in MPEG-4)
+    args: (b) => ['-c:a', 'aac', '-b:a', `${b}k`, '-f', 'ipod'],
+  },
+  {
+    id: 'ogg',
+    label: 'OGG Vorbis',
+    ext: 'ogg',
+    mime: 'audio/ogg',
+    lossless: false,
+    // libvorbis uses -q (VBR quality 0-10) but also accepts -b:a for ABR
+    args: (b) => ['-c:a', 'libvorbis', '-b:a', `${b}k`, '-f', 'ogg'],
+  },
+  {
+    id: 'opus',
+    label: 'Opus',
+    ext: 'opus',
+    mime: 'audio/ogg; codecs=opus',
+    lossless: false,
+    // Opus in Ogg container; bitrate in kbps
+    args: (b) => ['-c:a', 'libopus', '-b:a', `${b}k`, '-f', 'ogg'],
+  },
+  {
+    id: 'flac',
+    label: 'FLAC',
+    ext: 'flac',
+    mime: 'audio/flac',
+    lossless: true,
+    args: () => ['-c:a', 'flac', '-f', 'flac'],
+  },
+  {
+    id: 'wav',
+    label: 'WAV',
+    ext: 'wav',
+    mime: 'audio/wav',
+    lossless: true,
+    args: () => ['-c:a', 'pcm_s16le', '-f', 'wav'],
+  },
+]
+
+const FORMAT_MAP = Object.fromEntries(FORMATS.map((f) => [f.id, f])) as Record<FormatId, FormatOption>
 
 const BITRATE_OPTIONS: { value: Bitrate; label: string }[] = [
   { value: '64',  label: '64 kbps' },
@@ -24,21 +91,17 @@ interface DownloadItem {
   url: string
   label: string
   status: DownloadStatus
-  downloadProgress: number  // 0–100 streaming from server
-  convertProgress: number   // 0–100 ffmpeg conversion
+  downloadProgress: number
+  convertProgress: number
+  format: FormatId
   bitrate: Bitrate
   errorMsg?: string
 }
 
 // ── FFmpeg instance pool ──────────────────────────────────────────────────────
-// Each concurrent conversion needs its own FFmpeg WASM instance because a
-// single instance can only run one `exec` at a time. We load the core/wasm
-// blobs once and reuse them for every new instance to avoid redundant network
-// fetches.
 
 const BASE_URL = 'https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm'
 
-// Resolved once, then reused for all instances.
 let coreURLCache: string | null = null
 let wasmURLCache: string | null = null
 let urlsLoading: Promise<void> | null = null
@@ -57,15 +120,11 @@ async function loadCoreURLs(): Promise<void> {
   await urlsLoading
 }
 
-// Pool of idle instances ready to be acquired.
 const idlePool: FFmpeg[] = []
 
 async function acquireFFmpeg(): Promise<FFmpeg> {
   await loadCoreURLs()
-  if (idlePool.length > 0) {
-    return idlePool.pop()!
-  }
-  // Spin up a fresh instance.
+  if (idlePool.length > 0) return idlePool.pop()!
   const ff = new FFmpeg()
   await ff.load({ coreURL: coreURLCache!, wasmURL: wasmURLCache! })
   return ff
@@ -75,12 +134,8 @@ function releaseFFmpeg(ff: FFmpeg): void {
   idlePool.push(ff)
 }
 
-// Pre-warm: load URLs and one idle instance in the background.
 async function prewarmFFmpeg(): Promise<void> {
-  try {
-    const ff = await acquireFFmpeg()
-    releaseFFmpeg(ff)
-  } catch { /* ignore */ }
+  try { releaseFFmpeg(await acquireFFmpeg()) } catch { /* ignore */ }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -95,7 +150,6 @@ function sanitiseFilename(name: string): string {
 
 function extractTitle(disposition: string | null): string {
   if (!disposition) return ''
-  // filename*=UTF-8''...  or  filename="..."
   const m =
     disposition.match(/filename\*=UTF-8''([^;\r\n]+)/i) ??
     disposition.match(/filename=["']?([^"';\r\n]+)/i)
@@ -103,31 +157,11 @@ function extractTitle(disposition: string | null): string {
   return decodeURIComponent(m[1]).replace(/\.[^.]+$/, '').trim()
 }
 
-/**
- * 텍스트에서 YouTube URL을 모두 추출한다.
- *
- * 지원 형태 (구분자 무관):
- *   - 줄바꿈, 스페이스, 탭, 콤마, 세미콜론, 파이프, 대괄호, 따옴표 등 어떤 구분자도 OK
- *   - https://www.youtube.com/watch?v=...
- *   - https://youtu.be/...
- *   - https://youtube.com/shorts/...
- *   - https://m.youtube.com/watch?v=...
- *   - 위 모두의 http:// 변형
- *
- * URL 파라미터(playlist, timestamp 등)는 그대로 보존한다.
- */
 function parseUrls(text: string): string[] {
-  // YouTube URL 전체를 탐욕적으로 매칭.
-  // 공백/쉼표/괄호/따옴표 류를 URL 종단으로 취급한다.
   const RE =
     /https?:\/\/(?:(?:www\.|m\.)?youtube\.com\/(?:watch\?[^\s,;"'<>\[\]{}|\\^`]+|shorts\/[^\s,;"'<>\[\]{}|\\^`]+|embed\/[^\s,;"'<>\[\]{}|\\^`]+)|youtu\.be\/[^\s,;"'<>\[\]{}|\\^`]+)/gi
-
   const found = text.match(RE) ?? []
-
-  // 후행 구두점(마침표, 닫는 괄호 등) 제거
   const cleaned = found.map((u) => u.replace(/[.,;:!?)]+$/, ''))
-
-  // 중복 제거 (순서 유지)
   return [...new Set(cleaned)]
 }
 
@@ -139,27 +173,17 @@ export default function DownloaderPage() {
   const [inputUrl, setInputUrl] = useState('')
   const [items, setItems] = useState<DownloadItem[]>([])
   const inputRef = useRef<HTMLTextAreaElement>(null)
-  // Tracks IDs that are actively being processed to prevent duplicate runs
-  // (e.g. React Strict Mode double-invocation).
   const activeIds = useRef<Set<string>>(new Set())
 
   const patch = useCallback((id: string, delta: Partial<DownloadItem>) => {
     setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...delta } : it)))
   }, [])
 
-  /**
-   * 입력 텍스트에서 YouTube URL을 파싱해 리스트에 추가한다.
-   * 단일 URL이든, 여러 URL이 섞인 텍스트 블록이든 모두 처리한다.
-   */
   const addUrls = useCallback((textOverride?: string) => {
     const raw = (textOverride ?? inputUrl).trim()
     if (!raw) return
-
     const urls = parseUrls(raw)
-
-    // URL 패턴이 하나도 없으면 입력 전체를 URL로 간주 (비표준 URL 대비)
     const toAdd = urls.length > 0 ? urls : [raw]
-
     setItems((prev) => {
       const existingUrls = new Set(prev.map((it) => it.url))
       const newItems = toAdd
@@ -171,6 +195,7 @@ export default function DownloaderPage() {
           status: 'idle' as DownloadStatus,
           downloadProgress: 0,
           convertProgress: 0,
+          format: 'mp3' as FormatId,
           bitrate: '192' as Bitrate,
         }))
       if (newItems.length === 0) return prev
@@ -186,21 +211,18 @@ export default function DownloaderPage() {
     async (item: DownloadItem) => {
       if (item.status === 'downloading' || item.status === 'converting' || item.status === 'done') return
       if (!token) return
-      // Prevent duplicate concurrent runs for the same item id (Strict Mode, double-click, etc.)
       if (activeIds.current.has(item.id)) return
       activeIds.current.add(item.id)
 
       patch(item.id, { status: 'downloading', downloadProgress: 0, convertProgress: 0, errorMsg: undefined })
 
       try {
-        // 1. Request stream from server
         const response = await apiStream(token, item.url)
         const title = extractTitle(response.headers.get('content-disposition'))
         if (title) patch(item.id, { label: title })
 
         const contentLength = Number(response.headers.get('content-length') ?? '0')
 
-        // 2. Stream + buffer with progress
         const reader = response.body!.getReader()
         const chunks: Uint8Array[] = []
         let received = 0
@@ -227,54 +249,49 @@ export default function DownloaderPage() {
 
         patch(item.id, { downloadProgress: 100, status: 'converting', convertProgress: 0 })
 
-        // 3. Merge chunks
         const total = chunks.reduce((s, c) => s + c.byteLength, 0)
         const buf = new Uint8Array(total)
         let off = 0
         for (const c of chunks) { buf.set(c, off); off += c.byteLength }
 
-        // 4. FFmpeg convert → MP3 at selected bitrate
+        // ── FFmpeg conversion ───────────────────────────────────────────────
+        const fmt = FORMAT_MAP[item.format]
         const ff = await acquireFFmpeg()
-        const inputName = `in_${item.id}`
-        const outputName = `out_${item.id}.mp3`
+        const inputName  = `in_${item.id}`
+        const outputName = `out_${item.id}.${fmt.ext}`
 
         await ff.writeFile(inputName, buf)
 
         const onProg = ({ progress }: { progress: number }) => {
           if (progress >= 0 && progress <= 1) {
-            // Guard: don't overwrite a completed item's progress with a new conversion's events.
             if (!activeIds.current.has(item.id)) return
             patch(item.id, { convertProgress: Math.round(progress * 100) })
           }
         }
         ff.on('progress', onProg)
 
-        await ff.exec(['-i', inputName, '-vn', '-c:a', 'libmp3lame', '-b:a', `${item.bitrate}k`, '-f', 'mp3', outputName])
+        await ff.exec(['-i', inputName, '-vn', ...fmt.args(item.bitrate), outputName])
         ff.off('progress', onProg)
 
-        // 5. Download blob
-        const mp3 = await ff.readFile(outputName)
-        // FileData may be Uint8Array<SharedArrayBuffer> — copy to plain ArrayBuffer
-        const mp3Array = mp3 instanceof Uint8Array ? new Uint8Array(mp3) : mp3
-        const blob = new Blob([mp3Array as BlobPart], { type: 'audio/mpeg' })
+        const out = await ff.readFile(outputName)
+        const outArray = out instanceof Uint8Array ? new Uint8Array(out) : out
+        const blob = new Blob([outArray as BlobPart], { type: fmt.mime })
         const blobUrl = URL.createObjectURL(blob)
         const a = document.createElement('a')
         const finalLabel = title || item.label
         a.href = blobUrl
-        a.download = `${sanitiseFilename(finalLabel)}.mp3`
+        a.download = `${sanitiseFilename(finalLabel)}.${fmt.ext}`
         document.body.appendChild(a)
         a.click()
         document.body.removeChild(a)
         setTimeout(() => URL.revokeObjectURL(blobUrl), 15_000)
 
-        // Cleanup ffmpeg FS
-        try { await ff.deleteFile(inputName) } catch { /* ignore */ }
+        try { await ff.deleteFile(inputName)  } catch { /* ignore */ }
         try { await ff.deleteFile(outputName) } catch { /* ignore */ }
         releaseFFmpeg(ff)
 
         patch(item.id, { status: 'done', convertProgress: 100, label: title || item.label })
       } catch (err) {
-        // 401 Unauthorized → token expired or revoked; log out immediately
         if (isUnauthorizedError(err)) {
           activeIds.current.delete(item.id)
           logout()
@@ -291,68 +308,51 @@ export default function DownloaderPage() {
     [token, patch, logout],
   )
 
-  // ── Download All: idle 항목 전부 ──────────────────────────────────────────
   const handleDownloadAll = useCallback(() => {
-    const targets = items.filter((it) => it.status === 'idle')
-    targets.forEach((it) => handleDownload(it))
+    items.filter((it) => it.status === 'idle').forEach((it) => handleDownload(it))
   }, [items, handleDownload])
 
-  // ── Retry All Failed: error 항목 전부 재시도 ─────────────────────────────
   const handleRetryAllFailed = useCallback(() => {
-    const targets = items.filter((it) => it.status === 'error')
-    targets.forEach((it) =>
-      handleDownload({ ...it, status: 'idle', downloadProgress: 0, convertProgress: 0, errorMsg: undefined })
-    )
+    items
+      .filter((it) => it.status === 'error')
+      .forEach((it) =>
+        handleDownload({ ...it, status: 'idle', downloadProgress: 0, convertProgress: 0, errorMsg: undefined })
+      )
   }, [items, handleDownload])
 
-  // Pre-warm ffmpeg
-  useEffect(() => {
-    prewarmFFmpeg()
-  }, [])
+  useEffect(() => { prewarmFFmpeg() }, [])
 
-  // ── Ctrl+V 전역 감지: 포커스 없어도 URL 붙여넣기 ─────────────────────────
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      // Ctrl+V (Windows/Linux) or Cmd+V (Mac)
       if (!(e.ctrlKey || e.metaKey) || e.key !== 'v') return
-
-      // input/textarea에 포커스가 있으면 기본 동작에 맡김
       const active = document.activeElement
       if (
         active instanceof HTMLInputElement ||
         active instanceof HTMLTextAreaElement ||
         (active instanceof HTMLElement && active.isContentEditable)
       ) return
-
       e.preventDefault()
       navigator.clipboard.readText().then((text) => {
         const trimmed = text.trim()
         if (!trimmed) return
         setInputUrl(trimmed)
         addUrls(trimmed)
-      }).catch(() => {
-        inputRef.current?.focus()
-      })
+      }).catch(() => { inputRef.current?.focus() })
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [addUrls])
 
-  // ── 버튼 표시 조건 ─────────────────────────────────────────────────────────
   const idleCount   = items.filter((it) => it.status === 'idle').length
   const failedCount = items.filter((it) => it.status === 'error').length
 
-  // ── Render ─────────────────────────────────────────────────────────────────
-
   return (
     <div className="app-root">
-      {/* Background blobs */}
       <div className="blob blob-1" />
       <div className="blob blob-2" />
       <div className="blob blob-3" />
 
       <div className="app-inner">
-        {/* ── Top bar ── */}
         <header className="topbar">
           <div className="topbar-brand">
             <YoutubeIcon />
@@ -366,7 +366,6 @@ export default function DownloaderPage() {
           </div>
         </header>
 
-        {/* ── Hero ── */}
         <section className="hero">
           <h1 className="hero-title">YouTube Mp3 Downloader</h1>
           <div className="hero-meta">
@@ -375,7 +374,6 @@ export default function DownloaderPage() {
           </div>
         </section>
 
-        {/* ── Input ── */}
         <div className="input-row">
           <div className="input-wrap">
             <LinkIcon />
@@ -386,14 +384,12 @@ export default function DownloaderPage() {
               value={inputUrl}
               onChange={(e) => setInputUrl(e.target.value)}
               onKeyDown={(e) => {
-                // Ctrl+Enter or Cmd+Enter → add (일반 Enter는 줄바꿈 허용)
                 if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
                   e.preventDefault()
                   addUrls()
                 }
               }}
               onPaste={(e) => {
-                // 붙여넣기 시 즉시 파싱 & 추가
                 e.preventDefault()
                 const text = e.clipboardData.getData('text')
                 if (!text.trim()) return
@@ -403,16 +399,11 @@ export default function DownloaderPage() {
               autoFocus
             />
           </div>
-          <button
-            className="enter-btn"
-            onClick={() => addUrls()}
-            disabled={!inputUrl.trim()}
-          >
+          <button className="enter-btn" onClick={() => addUrls()} disabled={!inputUrl.trim()}>
             Add
           </button>
         </div>
 
-        {/* ── Action buttons row ── */}
         {(idleCount > 1 || failedCount > 0) && (
           <div className="dl-all-row">
             {idleCount > 1 && (
@@ -430,7 +421,6 @@ export default function DownloaderPage() {
           </div>
         )}
 
-        {/* ── List ── */}
         {items.length > 0 && (
           <ul className="dl-list">
             {items.map((item) => (
@@ -438,13 +428,13 @@ export default function DownloaderPage() {
                 key={item.id}
                 item={item}
                 onDownload={handleDownload}
+                onFormatChange={(id, format) => patch(id, { format })}
                 onBitrateChange={(id, bitrate) => patch(id, { bitrate })}
               />
             ))}
           </ul>
         )}
 
-        {/* ── Empty state ── */}
         {items.length === 0 && (
           <div className="empty-state">
             <MusicIcon />
@@ -462,69 +452,93 @@ export default function DownloaderPage() {
 function DownloadRow({
   item,
   onDownload,
+  onFormatChange,
   onBitrateChange,
 }: {
   item: DownloadItem
   onDownload: (item: DownloadItem) => void
+  onFormatChange: (id: string, format: FormatId) => void
   onBitrateChange: (id: string, bitrate: Bitrate) => void
 }) {
-  const { status, downloadProgress, convertProgress, label, errorMsg, bitrate } = item
+  const { status, downloadProgress, convertProgress, label, errorMsg, format, bitrate } = item
   const isActive = status === 'downloading' || status === 'converting'
-  const isDone = status === 'done'
-  const isError = status === 'error'
-  const isIdle = status === 'idle'
+  const isDone   = status === 'done'
+  const isError  = status === 'error'
+  const isIdle   = status === 'idle'
+  const canEdit  = isIdle || isError
 
-  // Bitrate selector는 idle 또는 error 상태에서만 활성화
-  const canChangeBitrate = isIdle || isError
+  const fmt = FORMAT_MAP[format]
 
-  // Unified display progress
-  // downloading: 0–50%, converting: 50–100%
   const displayProgress = isActive
     ? status === 'downloading'
       ? downloadProgress * 0.5
       : 50 + convertProgress * 0.5
-    : isDone
-    ? 100
-    : 0
+    : isDone ? 100 : 0
+
+  // Phase description for the progress label
+  const phaseLabel = status === 'downloading'
+    ? 'Streaming from server…'
+    : fmt.lossless
+      ? `Converting to ${fmt.label} (lossless)…`
+      : `Converting to ${fmt.label} (${bitrate} kbps)…`
 
   return (
     <li className={`dl-item ${isDone ? 'dl-item--done' : ''} ${isError ? 'dl-item--error' : ''}`}>
       <div className="dl-item-top">
         <div className="dl-item-label-wrap">
           {status === 'downloading' && <PulseIcon color="#60a5fa" />}
-          {status === 'converting' && <PulseIcon color="#a78bfa" />}
-          {isDone && <CheckIcon />}
+          {status === 'converting'  && <PulseIcon color="#a78bfa" />}
+          {isDone  && <CheckIcon />}
           {isError && <ErrorIcon />}
-          {isIdle && <IdleIcon />}
+          {isIdle  && <IdleIcon />}
           <span className="dl-item-label" title={label}>{label}</span>
         </div>
 
         <div className="dl-item-actions">
-          {/* 음질 선택 */}
+          {/* Format selector */}
           <select
-            className="bitrate-select"
-            value={bitrate}
-            disabled={!canChangeBitrate}
-            onChange={(e) => onBitrateChange(item.id, e.target.value as Bitrate)}
-            title="Audio quality"
+            className="format-select"
+            value={format}
+            disabled={!canEdit}
+            onChange={(e) => onFormatChange(item.id, e.target.value as FormatId)}
+            title="Output format"
           >
-            {BITRATE_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            {FORMATS.map((f) => (
+              <option key={f.id} value={f.id}>{f.label}</option>
             ))}
           </select>
 
-          {/* 일반 Download / 진행 중 / Done 버튼 */}
+          {/* Bitrate selector — hidden for lossless formats */}
+          {!fmt.lossless && (
+            <select
+              className="bitrate-select"
+              value={bitrate}
+              disabled={!canEdit}
+              onChange={(e) => onBitrateChange(item.id, e.target.value as Bitrate)}
+              title="Audio quality"
+            >
+              {BITRATE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          )}
+
+          {/* Download / status button */}
           {!isError && (
             <button
               className={`dl-btn ${isDone ? 'dl-btn--done' : ''}`}
               onClick={() => onDownload(item)}
               disabled={isActive || isDone}
             >
-              {isDone ? 'Done' : isActive ? (status === 'downloading' ? 'Streaming…' : 'Converting…') : 'Download'}
+              {isDone
+                ? 'Done'
+                : isActive
+                  ? status === 'downloading' ? 'Streaming…' : 'Converting…'
+                  : 'Download'}
             </button>
           )}
 
-          {/* 에러 시: 메시지 + Retry 버튼 */}
+          {/* Error: message + Retry */}
           {isError && (
             <>
               <span className="dl-error-msg" title={errorMsg}>
@@ -543,7 +557,6 @@ function DownloadRow({
         </div>
       </div>
 
-      {/* Progress bar — shown while active or done */}
       {(isActive || isDone) && (
         <div className="dl-progress-row">
           <div className="dl-progress-track">
@@ -558,12 +571,7 @@ function DownloadRow({
         </div>
       )}
 
-      {/* Phase label */}
-      {isActive && (
-        <p className="dl-phase">
-          {status === 'downloading' ? 'Streaming from server…' : `Converting to MP3 (${bitrate}kbps)…`}
-        </p>
-      )}
+      {isActive && <p className="dl-phase">{phaseLabel}</p>}
     </li>
   )
 }
@@ -635,9 +643,7 @@ function IdleIcon() {
 }
 
 function PulseIcon({ color }: { color: string }) {
-  return (
-    <span className="pulse-dot" style={{ background: color }} />
-  )
+  return <span className="pulse-dot" style={{ background: color }} />
 }
 
 function RetryIcon() {

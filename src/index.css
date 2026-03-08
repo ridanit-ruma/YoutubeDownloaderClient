@@ -553,6 +553,42 @@ body {
   flex-shrink: 0;
 }
 
+/* Format selector */
+.format-select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.1);
+  background: rgba(255,255,255,0.05);
+  color: rgba(255,255,255,0.55);
+  font-size: 0.75rem;
+  font-weight: 500;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+  flex-shrink: 0;
+  min-width: 90px;
+}
+.format-select:hover:not(:disabled) {
+  border-color: rgba(167,139,250,0.4);
+  background: rgba(124,58,237,0.1);
+  color: rgba(196,181,253,0.9);
+}
+.format-select:focus:not(:disabled) {
+  border-color: rgba(124,58,237,0.5);
+  background: rgba(124,58,237,0.12);
+  color: #c4b5fd;
+}
+.format-select:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+.format-select option {
+  background: #1e1b2e;
+  color: #e2e0ff;
+}
+
 /* Bitrate selector */
 .bitrate-select {
   appearance: none;
