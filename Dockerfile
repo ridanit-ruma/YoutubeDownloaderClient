@@ -44,7 +44,12 @@ FROM nginx:1.27-alpine AS runtime
 RUN rm /etc/nginx/conf.d/default.conf
 
 # ── nginx site configuration ──────────────────────────────────────────────────
-RUN cat > /etc/nginx/conf.d/app.conf << 'EOF'
+# Placed in /etc/nginx/templates/ so the official nginx entrypoint runs envsubst
+# on it at startup, substituting ${SERVER_HOST} and ${SERVER_PORT}.
+# Only those two variables are listed in NGINX_ENVSUBST_FILTER so that nginx's
+# own variables ($host, $remote_addr, etc.) are left untouched.
+RUN mkdir -p /etc/nginx/templates && \
+    cat > /etc/nginx/templates/app.conf.template << 'EOF'
 server {
     listen       80;
     server_name  _;
@@ -73,7 +78,7 @@ server {
 
     # ── API reverse proxy → backend server ────────────────────────────────────
     # Strips the /api prefix before forwarding, mirroring the Vite dev proxy.
-    # SERVER_HOST and SERVER_PORT are injected at runtime via envsubst.
+    # ${SERVER_HOST} and ${SERVER_PORT} are substituted at container start.
     location /api/ {
         proxy_pass         http://${SERVER_HOST}:${SERVER_PORT}/;
         proxy_http_version 1.1;
@@ -100,10 +105,12 @@ EOF
 # Copy the production bundle from the builder stage.
 COPY --from=builder /app/dist /usr/share/nginx/html
 
-# SERVER_HOST / SERVER_PORT are substituted into nginx.conf at container start
-# via the envsubst wrapper that the official nginx image runs automatically.
+# SERVER_HOST / SERVER_PORT are substituted by the nginx entrypoint at startup.
+# NGINX_ENVSUBST_FILTER restricts substitution to only these two variables so
+# that nginx built-ins like $host, $remote_addr, etc. are not touched.
 ENV SERVER_HOST=server \
-    SERVER_PORT=3000
+    SERVER_PORT=3000 \
+    NGINX_ENVSUBST_FILTER=SERVER_HOST|SERVER_PORT
 
 EXPOSE 80
 
