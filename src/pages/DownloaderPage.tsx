@@ -94,6 +94,34 @@ function extractTitle(disposition: string | null): string {
   return decodeURIComponent(m[1]).replace(/\.[^.]+$/, '').trim()
 }
 
+/**
+ * 텍스트에서 YouTube URL을 모두 추출한다.
+ *
+ * 지원 형태 (구분자 무관):
+ *   - 줄바꿈, 스페이스, 탭, 콤마, 세미콜론, 파이프, 대괄호, 따옴표 등 어떤 구분자도 OK
+ *   - https://www.youtube.com/watch?v=...
+ *   - https://youtu.be/...
+ *   - https://youtube.com/shorts/...
+ *   - https://m.youtube.com/watch?v=...
+ *   - 위 모두의 http:// 변형
+ *
+ * URL 파라미터(playlist, timestamp 등)는 그대로 보존한다.
+ */
+function parseUrls(text: string): string[] {
+  // YouTube URL 전체를 탐욕적으로 매칭.
+  // 공백/쉼표/괄호/따옴표 류를 URL 종단으로 취급한다.
+  const RE =
+    /https?:\/\/(?:(?:www\.|m\.)?youtube\.com\/(?:watch\?[^\s,;"'<>\[\]{}|\\^`]+|shorts\/[^\s,;"'<>\[\]{}|\\^`]+|embed\/[^\s,;"'<>\[\]{}|\\^`]+)|youtu\.be\/[^\s,;"'<>\[\]{}|\\^`]+)/gi
+
+  const found = text.match(RE) ?? []
+
+  // 후행 구두점(마침표, 닫는 괄호 등) 제거
+  const cleaned = found.map((u) => u.replace(/[.,;:!?)]+$/, ''))
+
+  // 중복 제거 (순서 유지)
+  return [...new Set(cleaned)]
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function DownloaderPage() {
@@ -101,7 +129,7 @@ export default function DownloaderPage() {
 
   const [inputUrl, setInputUrl] = useState('')
   const [items, setItems] = useState<DownloadItem[]>([])
-  const inputRef = useRef<HTMLInputElement>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
   // Tracks IDs that are actively being processed to prevent duplicate runs
   // (e.g. React Strict Mode double-invocation).
   const activeIds = useRef<Set<string>>(new Set())
@@ -110,16 +138,33 @@ export default function DownloaderPage() {
     setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...delta } : it)))
   }, [])
 
-  const addUrl = useCallback((urlOverride?: string) => {
-    const raw = (urlOverride ?? inputUrl).trim()
+  /**
+   * 입력 텍스트에서 YouTube URL을 파싱해 리스트에 추가한다.
+   * 단일 URL이든, 여러 URL이 섞인 텍스트 블록이든 모두 처리한다.
+   */
+  const addUrls = useCallback((textOverride?: string) => {
+    const raw = (textOverride ?? inputUrl).trim()
     if (!raw) return
+
+    const urls = parseUrls(raw)
+
+    // URL 패턴이 하나도 없으면 입력 전체를 URL로 간주 (비표준 URL 대비)
+    const toAdd = urls.length > 0 ? urls : [raw]
+
     setItems((prev) => {
-      // Prevent duplicate entries for the same URL (also guards Strict Mode double-invocation)
-      if (prev.some((it) => it.url === raw)) return prev
-      return [
-        ...prev,
-        { id: uid(), url: raw, label: raw, status: 'idle', downloadProgress: 0, convertProgress: 0 },
-      ]
+      const existingUrls = new Set(prev.map((it) => it.url))
+      const newItems = toAdd
+        .filter((u) => !existingUrls.has(u))
+        .map((u) => ({
+          id: uid(),
+          url: u,
+          label: u,
+          status: 'idle' as DownloadStatus,
+          downloadProgress: 0,
+          convertProgress: 0,
+        }))
+      if (newItems.length === 0) return prev
+      return [...prev, ...newItems]
     })
     setInputUrl('')
     inputRef.current?.focus()
@@ -269,12 +314,11 @@ export default function DownloaderPage() {
 
       e.preventDefault()
       navigator.clipboard.readText().then((text) => {
-        const url = text.trim()
-        if (!url) return
-        // 인풋에 넣고 곧바로 addUrl 트리거
-        setInputUrl(url)
-        // 다음 렌더 후 addUrl이 최신 inputUrl을 볼 수 있도록 urlOverride 직접 전달
-        addUrl(url)
+        const trimmed = text.trim()
+        if (!trimmed) return
+        // 인풋에 넣고 곧바로 addUrls 트리거
+        setInputUrl(trimmed)
+        addUrls(trimmed)
       }).catch(() => {
         // clipboard 권한 없을 경우 input에 포커스만 이동
         inputRef.current?.focus()
@@ -282,7 +326,7 @@ export default function DownloaderPage() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [addUrl])
+  }, [addUrls])
 
   // ── 버튼 표시 조건 ─────────────────────────────────────────────────────────
   const downloadableCount = items.filter(
@@ -326,20 +370,33 @@ export default function DownloaderPage() {
         <div className="input-row">
           <div className="input-wrap">
             <LinkIcon />
-            <input
+            <textarea
               ref={inputRef}
-              type="text"
               className="url-input"
-              placeholder="Paste a YouTube URL here..."
+              placeholder="Paste YouTube URL(s) here — one per line, comma-separated, or mixed…"
               value={inputUrl}
               onChange={(e) => setInputUrl(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && addUrl()}
+              onKeyDown={(e) => {
+                // Ctrl+Enter or Cmd+Enter → add (일반 Enter는 줄바꿈 허용)
+                if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                  e.preventDefault()
+                  addUrls()
+                }
+              }}
+              onPaste={(e) => {
+                // 붙여넣기 시 즉시 파싱 & 추가
+                e.preventDefault()
+                const text = e.clipboardData.getData('text')
+                if (!text.trim()) return
+                addUrls(text)
+              }}
+              rows={1}
               autoFocus
             />
           </div>
           <button
             className="enter-btn"
-            onClick={() => addUrl()}
+            onClick={() => addUrls()}
             disabled={!inputUrl.trim()}
           >
             Add
@@ -369,8 +426,8 @@ export default function DownloaderPage() {
         {items.length === 0 && (
           <div className="empty-state">
             <MusicIcon />
-            <p>Paste a YouTube link above and press <kbd>Enter</kbd></p>
-            <p className="empty-hint">Tip: press <kbd>Ctrl+V</kbd> anywhere to add a URL instantly</p>
+            <p>Paste YouTube link(s) above and press <kbd>Ctrl+Enter</kbd></p>
+            <p className="empty-hint">Multiple URLs at once — newline, space, comma, or any separator</p>
           </div>
         )}
       </div>
