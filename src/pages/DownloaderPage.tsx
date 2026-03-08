@@ -21,45 +21,57 @@ interface DownloadItem {
   errorMsg?: string
 }
 
-// ── FFmpeg singleton ──────────────────────────────────────────────────────────
+// ── FFmpeg instance pool ──────────────────────────────────────────────────────
+// Each concurrent conversion needs its own FFmpeg WASM instance because a
+// single instance can only run one `exec` at a time. We load the core/wasm
+// blobs once and reuse them for every new instance to avoid redundant network
+// fetches.
 
-let ffmpegInstance: FFmpeg | null = null
-let ffmpegLoaded = false
-let ffmpegLoading = false
-let ffmpegLoadCallbacks: Array<(ok: boolean) => void> = []
+const BASE_URL = 'https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm'
 
-async function getFFmpeg(): Promise<FFmpeg> {
-  if (ffmpegLoaded && ffmpegInstance) return ffmpegInstance
-  if (ffmpegLoading) {
-    return new Promise<FFmpeg>((resolve, reject) => {
-      ffmpegLoadCallbacks.push((ok) => {
-        if (ok && ffmpegInstance) resolve(ffmpegInstance)
-        else reject(new Error('FFmpeg load failed'))
-      })
-    })
-  }
-  ffmpegLoading = true
-  const ff = new FFmpeg()
-  try {
-    // toBlobURL fetches the file and wraps it in a blob:// URL,
-    // completely bypassing Vite's module transform and COEP restrictions.
-    const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm'
+// Resolved once, then reused for all instances.
+let coreURLCache: string | null = null
+let wasmURLCache: string | null = null
+let urlsLoading: Promise<void> | null = null
+
+async function loadCoreURLs(): Promise<void> {
+  if (coreURLCache && wasmURLCache) return
+  if (urlsLoading) return urlsLoading
+  urlsLoading = (async () => {
     const [coreURL, wasmURL] = await Promise.all([
-      toBlobURL(`${baseURL}/ffmpeg-core.js`,   'text/javascript'),
-      toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+      toBlobURL(`${BASE_URL}/ffmpeg-core.js`,   'text/javascript'),
+      toBlobURL(`${BASE_URL}/ffmpeg-core.wasm`, 'application/wasm'),
     ])
-    await ff.load({ coreURL, wasmURL })
-    ffmpegInstance = ff
-    ffmpegLoaded = true
-    ffmpegLoadCallbacks.forEach((cb) => cb(true))
-  } catch {
-    ffmpegLoadCallbacks.forEach((cb) => cb(false))
-    throw new Error('Failed to load FFmpeg WASM')
-  } finally {
-    ffmpegLoading = false
-    ffmpegLoadCallbacks = []
+    coreURLCache = coreURL
+    wasmURLCache = wasmURL
+  })()
+  await urlsLoading
+}
+
+// Pool of idle instances ready to be acquired.
+const idlePool: FFmpeg[] = []
+
+async function acquireFFmpeg(): Promise<FFmpeg> {
+  await loadCoreURLs()
+  if (idlePool.length > 0) {
+    return idlePool.pop()!
   }
-  return ffmpegInstance!
+  // Spin up a fresh instance.
+  const ff = new FFmpeg()
+  await ff.load({ coreURL: coreURLCache!, wasmURL: wasmURLCache! })
+  return ff
+}
+
+function releaseFFmpeg(ff: FFmpeg): void {
+  idlePool.push(ff)
+}
+
+// Pre-warm: load URLs and one idle instance in the background.
+async function prewarmFFmpeg(): Promise<void> {
+  try {
+    const ff = await acquireFFmpeg()
+    releaseFFmpeg(ff)
+  } catch { /* ignore */ }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -90,6 +102,9 @@ export default function DownloaderPage() {
   const [inputUrl, setInputUrl] = useState('')
   const [items, setItems] = useState<DownloadItem[]>([])
   const inputRef = useRef<HTMLInputElement>(null)
+  // Tracks IDs that are actively being processed to prevent duplicate runs
+  // (e.g. React Strict Mode double-invocation).
+  const activeIds = useRef<Set<string>>(new Set())
 
   const patch = useCallback((id: string, delta: Partial<DownloadItem>) => {
     setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...delta } : it)))
@@ -98,10 +113,14 @@ export default function DownloaderPage() {
   const addUrl = useCallback((urlOverride?: string) => {
     const raw = (urlOverride ?? inputUrl).trim()
     if (!raw) return
-    setItems((prev) => [
-      ...prev,
-      { id: uid(), url: raw, label: raw, status: 'idle', downloadProgress: 0, convertProgress: 0 },
-    ])
+    setItems((prev) => {
+      // Prevent duplicate entries for the same URL (also guards Strict Mode double-invocation)
+      if (prev.some((it) => it.url === raw)) return prev
+      return [
+        ...prev,
+        { id: uid(), url: raw, label: raw, status: 'idle', downloadProgress: 0, convertProgress: 0 },
+      ]
+    })
     setInputUrl('')
     inputRef.current?.focus()
   }, [inputUrl])
@@ -112,6 +131,9 @@ export default function DownloaderPage() {
     async (item: DownloadItem) => {
       if (item.status === 'downloading' || item.status === 'converting' || item.status === 'done') return
       if (!token) return
+      // Prevent duplicate concurrent runs for the same item id (Strict Mode, double-click, etc.)
+      if (activeIds.current.has(item.id)) return
+      activeIds.current.add(item.id)
 
       patch(item.id, { status: 'downloading', downloadProgress: 0, convertProgress: 0, errorMsg: undefined })
 
@@ -157,7 +179,7 @@ export default function DownloaderPage() {
         for (const c of chunks) { buf.set(c, off); off += c.byteLength }
 
         // 4. FFmpeg convert → MP3 192k
-        const ff = await getFFmpeg()
+        const ff = await acquireFFmpeg()
         const inputName = `in_${item.id}`
         const outputName = `out_${item.id}.mp3`
 
@@ -165,6 +187,9 @@ export default function DownloaderPage() {
 
         const onProg = ({ progress }: { progress: number }) => {
           if (progress >= 0 && progress <= 1) {
+            // Guard: don't overwrite a completed item's progress with a new conversion's events.
+            // This can happen because FFmpeg is a global singleton shared across all items.
+            if (!activeIds.current.has(item.id)) return
             patch(item.id, { convertProgress: Math.round(progress * 100) })
           }
         }
@@ -191,11 +216,13 @@ export default function DownloaderPage() {
         // Cleanup ffmpeg FS
         try { await ff.deleteFile(inputName) } catch { /* ignore */ }
         try { await ff.deleteFile(outputName) } catch { /* ignore */ }
+        releaseFFmpeg(ff)
 
         patch(item.id, { status: 'done', convertProgress: 100, label: title || item.label })
       } catch (err) {
         // 401 Unauthorized → token expired or revoked; log out immediately
         if (isUnauthorizedError(err)) {
+          activeIds.current.delete(item.id)
           logout()
           return
         }
@@ -203,6 +230,8 @@ export default function DownloaderPage() {
           (err as ApiError).message ??
           (err instanceof Error ? err.message : 'Unknown error')
         patch(item.id, { status: 'error', errorMsg: msg })
+      } finally {
+        activeIds.current.delete(item.id)
       }
     },
     [token, patch, logout],
@@ -221,7 +250,7 @@ export default function DownloaderPage() {
 
   // Pre-warm ffmpeg
   useEffect(() => {
-    getFFmpeg().catch(() => {})
+    prewarmFFmpeg()
   }, [])
 
   // ── Ctrl+V 전역 감지: 포커스 없어도 URL 붙여넣기 ─────────────────────────
