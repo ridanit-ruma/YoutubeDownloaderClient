@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { FFmpeg } from '@ffmpeg/ffmpeg'
 import { toBlobURL } from '@ffmpeg/util'
 import { useAuth } from '../context/AuthContext'
-import { apiStream, isUnauthorizedError } from '../lib/api'
+import { apiStream, apiStreamVideo, isUnauthorizedError } from '../lib/api'
 import type { ApiError } from '../lib/api'
 
 const APP_VERSION = '0.1.0'
@@ -12,6 +12,8 @@ const APP_VERSION = '0.1.0'
 type DownloadStatus = 'idle' | 'downloading' | 'converting' | 'done' | 'error'
 type Bitrate = '64' | '128' | '192' | '320'
 type FormatId = 'mp3' | 'm4a' | 'ogg' | 'opus' | 'flac' | 'wav'
+type DownloadMode = 'audio' | 'video'
+type VideoHeight = 0 | 360 | 480 | 720 | 1080 | 1440 | 2160
 
 interface FormatOption {
   id: FormatId
@@ -86,6 +88,16 @@ const BITRATE_OPTIONS: { value: Bitrate; label: string }[] = [
   { value: '320', label: '320 kbps' },
 ]
 
+const VIDEO_HEIGHT_OPTIONS: { value: VideoHeight; label: string }[] = [
+  { value: 2160, label: '4K (2160p)' },
+  { value: 1440, label: '1440p' },
+  { value: 1080, label: '1080p' },
+  { value: 720,  label: '720p' },
+  { value: 480,  label: '480p' },
+  { value: 360,  label: '360p' },
+  { value: 0,    label: 'Best' },
+]
+
 interface DownloadItem {
   id: string
   url: string
@@ -93,8 +105,10 @@ interface DownloadItem {
   status: DownloadStatus
   downloadProgress: number
   convertProgress: number
+  mode: DownloadMode
   format: FormatId
   bitrate: Bitrate
+  videoHeight: VideoHeight
   errorMsg?: string
 }
 
@@ -172,6 +186,7 @@ export default function DownloaderPage() {
 
   const [inputUrl, setInputUrl] = useState('')
   const [items, setItems] = useState<DownloadItem[]>([])
+  const [clipboardUrl, setClipboardUrl] = useState<string | null>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const activeIds = useRef<Set<string>>(new Set())
 
@@ -195,8 +210,10 @@ export default function DownloaderPage() {
           status: 'idle' as DownloadStatus,
           downloadProgress: 0,
           convertProgress: 0,
+          mode: 'audio' as DownloadMode,
           format: 'mp3' as FormatId,
           bitrate: '192' as Bitrate,
+          videoHeight: 1080 as VideoHeight,
         }))
       if (newItems.length === 0) return prev
       return [...prev, ...newItems]
@@ -217,6 +234,121 @@ export default function DownloaderPage() {
       patch(item.id, { status: 'downloading', downloadProgress: 0, convertProgress: 0, errorMsg: undefined })
 
       try {
+        // ── VIDEO MODE ──────────────────────────────────────────────────────
+        if (item.mode === 'video') {
+          // Fetch video-only and audio-only streams in parallel
+          const [videoRes, audioRes] = await Promise.all([
+            apiStreamVideo(token, item.url, item.videoHeight),
+            apiStream(token, item.url),
+          ])
+
+          const title = extractTitle(videoRes.headers.get('content-disposition'))
+          if (title) patch(item.id, { label: title })
+
+          const videoLen = Number(videoRes.headers.get('content-length') ?? '0')
+          const audioLen = Number(audioRes.headers.get('content-length') ?? '0')
+          const totalLen = videoLen + audioLen
+
+          // Helper: consume a ReadableStream and report progress
+          // progressOffset: how many bytes were already counted before this stream
+          const readStream = async (
+            res: Response,
+            onProgress: (received: number) => void,
+          ): Promise<Uint8Array> => {
+            const reader = res.body!.getReader()
+            const chunks: Uint8Array[] = []
+            let received = 0
+            while (true) {
+              const { done, value } = await reader.read()
+              if (done) break
+              if (value) {
+                chunks.push(value)
+                received += value.byteLength
+                onProgress(received)
+              }
+            }
+            const total = chunks.reduce((s, c) => s + c.byteLength, 0)
+            const buf = new Uint8Array(total)
+            let off = 0
+            for (const c of chunks) { buf.set(c, off); off += c.byteLength }
+            return buf
+          }
+
+          // Track combined download progress (video + audio = 0→80%)
+          let videoReceived = 0
+          let audioReceived = 0
+          const updateDownloadProgress = () => {
+            if (totalLen > 0) {
+              const pct = Math.min(80, ((videoReceived + audioReceived) / totalLen) * 80)
+              patch(item.id, { downloadProgress: pct })
+            } else {
+              setItems((prev) =>
+                prev.map((it) =>
+                  it.id === item.id
+                    ? { ...it, downloadProgress: Math.min(75, it.downloadProgress + 0.2) }
+                    : it,
+                ),
+              )
+            }
+          }
+
+          const [videoBuf, audioBuf] = await Promise.all([
+            readStream(videoRes, (n) => { videoReceived = n; updateDownloadProgress() }),
+            readStream(audioRes, (n) => { audioReceived = n; updateDownloadProgress() }),
+          ])
+
+          // Mux with FFmpeg WASM (80→100%)
+          patch(item.id, { downloadProgress: 80, status: 'converting', convertProgress: 0 })
+
+          const ff = await acquireFFmpeg()
+          const vidName = `vid_${item.id}`
+          const audName = `aud_${item.id}`
+          const outName = `out_${item.id}.mp4`
+
+          await ff.writeFile(vidName, videoBuf)
+          await ff.writeFile(audName, audioBuf)
+
+          const onProg = ({ progress }: { progress: number }) => {
+            if (progress >= 0 && progress <= 1) {
+              if (!activeIds.current.has(item.id)) return
+              patch(item.id, { convertProgress: Math.round(progress * 100) })
+            }
+          }
+          ff.on('progress', onProg)
+
+          // -c copy: no re-encode, just remux video + audio into MP4
+          await ff.exec([
+            '-i', vidName,
+            '-i', audName,
+            '-c', 'copy',
+            '-movflags', '+faststart',
+            outName,
+          ])
+          ff.off('progress', onProg)
+
+          const out = await ff.readFile(outName)
+          const outArray = out instanceof Uint8Array ? out : new Uint8Array(out as unknown as ArrayBuffer)
+          const blob = new Blob([outArray as unknown as BlobPart], { type: 'video/mp4' })
+          const blobUrl = URL.createObjectURL(blob)
+          const a = document.createElement('a')
+          const finalLabel = title || item.label
+          a.href = blobUrl
+          a.download = `${sanitiseFilename(finalLabel)}.mp4`
+          document.body.appendChild(a)
+          a.click()
+          document.body.removeChild(a)
+          setTimeout(() => URL.revokeObjectURL(blobUrl), 15_000)
+
+          try { await ff.deleteFile(vidName) } catch { /* ignore */ }
+          try { await ff.deleteFile(audName) } catch { /* ignore */ }
+          try { await ff.deleteFile(outName) } catch { /* ignore */ }
+          releaseFFmpeg(ff)
+
+          patch(item.id, { status: 'done', downloadProgress: 100, convertProgress: 100, label: title || item.label })
+          return
+        }
+
+        // ── AUDIO MODE ──────────────────────────────────────────────────────
         const response = await apiStream(token, item.url)
         const title = extractTitle(response.headers.get('content-disposition'))
         if (title) patch(item.id, { label: title })
@@ -343,6 +475,48 @@ export default function DownloaderPage() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [addUrls])
 
+  // ── Clipboard YouTube URL detection ────────────────────────────────────────
+  useEffect(() => {
+    const check = () => {
+      if (!navigator.clipboard?.readText) return
+      navigator.clipboard.readText().then((text) => {
+        const urls = parseUrls(text.trim())
+        if (urls.length > 0) {
+          const url = urls[0]
+          setClipboardUrl((prev) => (prev === url ? prev : url))
+        } else {
+          setClipboardUrl(null)
+        }
+      }).catch(() => { /* permission denied or no text — ignore */ })
+    }
+
+    // Check on focus (user switches back to the tab)
+    window.addEventListener('focus', check)
+    // Also check when tab becomes visible (e.g. switching from another tab)
+    const onVisibility = () => { if (document.visibilityState === 'visible') check() }
+    document.addEventListener('visibilitychange', onVisibility)
+    // Also check when mouse enters the page (catches cases where focus event doesn't fire)
+    document.addEventListener('pointerenter', check, { once: false, capture: false })
+    // Check once on mount
+    check()
+
+    return () => {
+      window.removeEventListener('focus', check)
+      document.removeEventListener('visibilitychange', onVisibility)
+      document.removeEventListener('pointerenter', check)
+    }
+  }, [])
+
+  // Hide clipboard banner if that URL is already in the list
+  const clipboardAlreadyAdded = clipboardUrl != null && items.some((it) => it.url === clipboardUrl)
+  const showClipboardBanner = clipboardUrl != null && !clipboardAlreadyAdded
+
+  const handleAddClipboard = useCallback(() => {
+    if (!clipboardUrl) return
+    addUrls(clipboardUrl)
+    setClipboardUrl(null)
+  }, [clipboardUrl, addUrls])
+
   const idleCount   = items.filter((it) => it.status === 'idle').length
   const failedCount = items.filter((it) => it.status === 'error').length
 
@@ -356,7 +530,7 @@ export default function DownloaderPage() {
         <header className="topbar">
           <div className="topbar-brand">
             <YoutubeIcon />
-            <span>YouTube Mp3</span>
+            <span>ytdlWeb</span>
           </div>
           <div className="topbar-right">
             <span className="topbar-user">{claims?.username}</span>
@@ -367,7 +541,7 @@ export default function DownloaderPage() {
         </header>
 
         <section className="hero">
-          <h1 className="hero-title">YouTube Mp3 Downloader</h1>
+          <h1 className="hero-title">YouTube Downloader</h1>
           <div className="hero-meta">
             <span className="hero-tag">-Web</span>
             <span className="hero-version">v{APP_VERSION}</span>
@@ -423,13 +597,34 @@ export default function DownloaderPage() {
 
         {items.length > 0 && (
           <ul className="dl-list">
+            {showClipboardBanner && (
+              <li className="dl-item dl-item--clipboard">
+                <div className="dl-item-top">
+                  <div className="dl-item-label-wrap">
+                    <ClipboardIcon />
+                    <span className="dl-clipboard-badge">클립보드의 영상</span>
+                    <span className="dl-item-label" title={clipboardUrl!}>{clipboardUrl!}</span>
+                  </div>
+                  <div className="dl-item-actions">
+                    <button className="dl-btn dl-btn--clipboard" onClick={handleAddClipboard}>
+                      추가
+                    </button>
+                    <button className="dl-clipboard-dismiss" onClick={() => setClipboardUrl(null)} title="닫기">
+                      <DismissIcon />
+                    </button>
+                  </div>
+                </div>
+              </li>
+            )}
             {items.map((item) => (
               <DownloadRow
                 key={item.id}
                 item={item}
                 onDownload={handleDownload}
+                onModeChange={(id, mode) => patch(id, { mode })}
                 onFormatChange={(id, format) => patch(id, { format })}
                 onBitrateChange={(id, bitrate) => patch(id, { bitrate })}
+                onVideoHeightChange={(id, videoHeight) => patch(id, { videoHeight })}
               />
             ))}
           </ul>
@@ -437,6 +632,19 @@ export default function DownloaderPage() {
 
         {items.length === 0 && (
           <div className="empty-state">
+            {showClipboardBanner && (
+              <div className="clipboard-banner">
+                <ClipboardIcon />
+                <span className="dl-clipboard-badge">클립보드의 영상</span>
+                <span className="clipboard-banner-url" title={clipboardUrl!}>{clipboardUrl!}</span>
+                <button className="dl-btn dl-btn--clipboard" onClick={handleAddClipboard}>
+                  추가
+                </button>
+                <button className="dl-clipboard-dismiss" onClick={() => setClipboardUrl(null)} title="닫기">
+                  <DismissIcon />
+                </button>
+              </div>
+            )}
             <MusicIcon />
             <p>Paste YouTube link(s) above and press <kbd>Ctrl+Enter</kbd></p>
             <p className="empty-hint">Multiple URLs at once — newline, space, comma, or any separator</p>
@@ -452,15 +660,19 @@ export default function DownloaderPage() {
 function DownloadRow({
   item,
   onDownload,
+  onModeChange,
   onFormatChange,
   onBitrateChange,
+  onVideoHeightChange,
 }: {
   item: DownloadItem
   onDownload: (item: DownloadItem) => void
+  onModeChange: (id: string, mode: DownloadMode) => void
   onFormatChange: (id: string, format: FormatId) => void
   onBitrateChange: (id: string, bitrate: Bitrate) => void
+  onVideoHeightChange: (id: string, height: VideoHeight) => void
 }) {
-  const { status, downloadProgress, convertProgress, label, errorMsg, format, bitrate } = item
+  const { status, downloadProgress, convertProgress, label, errorMsg, mode, format, bitrate, videoHeight } = item
   const isActive = status === 'downloading' || status === 'converting'
   const isDone   = status === 'done'
   const isError  = status === 'error'
@@ -468,19 +680,28 @@ function DownloadRow({
   const canEdit  = isIdle || isError
 
   const fmt = FORMAT_MAP[format]
+  const isVideo = mode === 'video'
 
   const displayProgress = isActive
     ? status === 'downloading'
-      ? downloadProgress * 0.5
-      : 50 + convertProgress * 0.5
+      ? isVideo
+        ? downloadProgress          // video: 0→80 during download
+        : downloadProgress * 0.5    // audio: 0→50 during download
+      : isVideo
+        ? 80 + convertProgress * 0.2  // video: 80→100 during mux
+        : 50 + convertProgress * 0.5  // audio: 50→100 during convert
     : isDone ? 100 : 0
 
   // Phase description for the progress label
   const phaseLabel = status === 'downloading'
-    ? 'Streaming from server…'
-    : fmt.lossless
-      ? `Converting to ${fmt.label} (lossless)…`
-      : `Converting to ${fmt.label} (${bitrate} kbps)…`
+    ? isVideo
+      ? 'Downloading video + audio…'
+      : 'Streaming from server…'
+    : isVideo
+      ? 'Muxing video + audio…'
+      : fmt.lossless
+        ? `Converting to ${fmt.label} (lossless)…`
+        : `Converting to ${fmt.label} (${bitrate} kbps)…`
 
   return (
     <li className={`dl-item ${isDone ? 'dl-item--done' : ''} ${isError ? 'dl-item--error' : ''}`}>
@@ -495,21 +716,43 @@ function DownloadRow({
         </div>
 
         <div className="dl-item-actions">
-          {/* Format selector */}
-          <select
-            className="format-select"
-            value={format}
-            disabled={!canEdit}
-            onChange={(e) => onFormatChange(item.id, e.target.value as FormatId)}
-            title="Output format"
-          >
-            {FORMATS.map((f) => (
-              <option key={f.id} value={f.id}>{f.label}</option>
-            ))}
-          </select>
+          {/* Mode toggle: Audio / Video */}
+          <div className="mode-toggle" role="group" aria-label="Download mode">
+            <button
+              className={`mode-btn ${!isVideo ? 'mode-btn--active' : ''}`}
+              disabled={!canEdit}
+              onClick={() => onModeChange(item.id, 'audio')}
+              title="Audio"
+            >
+              <AudioIcon /> Audio
+            </button>
+            <button
+              className={`mode-btn ${isVideo ? 'mode-btn--active' : ''}`}
+              disabled={!canEdit}
+              onClick={() => onModeChange(item.id, 'video')}
+              title="Video"
+            >
+              <VideoIcon /> Video
+            </button>
+          </div>
 
-          {/* Bitrate selector — hidden for lossless formats */}
-          {!fmt.lossless && (
+          {/* Audio: format selector */}
+          {!isVideo && (
+            <select
+              className="format-select"
+              value={format}
+              disabled={!canEdit}
+              onChange={(e) => onFormatChange(item.id, e.target.value as FormatId)}
+              title="Output format"
+            >
+              {FORMATS.map((f) => (
+                <option key={f.id} value={f.id}>{f.label}</option>
+              ))}
+            </select>
+          )}
+
+          {/* Audio: bitrate selector — hidden for lossless formats */}
+          {!isVideo && !fmt.lossless && (
             <select
               className="bitrate-select"
               value={bitrate}
@@ -518,6 +761,21 @@ function DownloadRow({
               title="Audio quality"
             >
               {BITRATE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          )}
+
+          {/* Video: resolution selector */}
+          {isVideo && (
+            <select
+              className="format-select"
+              value={videoHeight}
+              disabled={!canEdit}
+              onChange={(e) => onVideoHeightChange(item.id, Number(e.target.value) as VideoHeight)}
+              title="Video quality"
+            >
+              {VIDEO_HEIGHT_OPTIONS.map((opt) => (
                 <option key={opt.value} value={opt.value}>{opt.label}</option>
               ))}
             </select>
@@ -661,6 +919,43 @@ function DownloadAllIcon() {
       <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
       <polyline points="7 10 12 15 17 10"/>
       <line x1="12" y1="15" x2="12" y2="3"/>
+    </svg>
+  )
+}
+
+function AudioIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 18V5l12-2v13"/>
+      <circle cx="6" cy="18" r="3"/>
+      <circle cx="18" cy="16" r="3"/>
+    </svg>
+  )
+}
+
+function VideoIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polygon points="23 7 16 12 23 17 23 7"/>
+      <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+    </svg>
+  )
+}
+
+function ClipboardIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, opacity: 0.7 }}>
+      <rect x="9" y="2" width="6" height="4" rx="1"/>
+      <path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2"/>
+    </svg>
+  )
+}
+
+function DismissIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="18" y1="6" x2="6" y2="18"/>
+      <line x1="6" y1="6" x2="18" y2="18"/>
     </svg>
   )
 }

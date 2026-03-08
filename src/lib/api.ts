@@ -131,6 +131,31 @@ export async function apiStream(token: string, url: string): Promise<Response> {
   return res
 }
 
+/**
+ * Returns the raw Response for the video stream.
+ * Caller is responsible for consuming response.body.
+ * @param height - target height in pixels (0 = best available)
+ */
+export async function apiStreamVideo(token: string, url: string, height: number): Promise<Response> {
+  const res = await fetch(
+    `${BASE}/stream-video?url=${encodeURIComponent(url)}&height=${height}`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  )
+  if (!res.ok) {
+    let code = 'UNKNOWN'
+    let message = `HTTP ${res.status}`
+    try {
+      const body = await res.json()
+      const errObj = body?.error ?? body
+      code = errObj.code ?? code
+      message = errObj.message ?? message
+    } catch { /* ignore */ }
+    const err: ApiError = { status: res.status, code, message }
+    throw err
+  }
+  return res
+}
+
 // ── Error helpers ─────────────────────────────────────────────────────────────
 
 /** Returns true if the error is a 401 Unauthorized response from the server. */

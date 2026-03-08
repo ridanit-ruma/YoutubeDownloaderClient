@@ -493,6 +493,77 @@ body {
   background: rgba(248, 113, 113, 0.03);
 }
 
+/* Clipboard banner item */
+.dl-item--clipboard {
+  border-color: rgba(124, 58, 237, 0.35);
+  background: rgba(124, 58, 237, 0.07);
+  animation: itemIn 0.25s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.dl-clipboard-badge {
+  flex-shrink: 0;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #a78bfa;
+  background: rgba(124, 58, 237, 0.18);
+  border: 1px solid rgba(124, 58, 237, 0.35);
+  border-radius: 6px;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+.dl-btn--clipboard {
+  border-color: rgba(124, 58, 237, 0.4);
+  background: rgba(124, 58, 237, 0.15);
+  color: #c4b5fd;
+}
+.dl-btn--clipboard:hover:not(:disabled) {
+  background: rgba(124, 58, 237, 0.28);
+  border-color: rgba(124, 58, 237, 0.6);
+  color: #ddd6fe;
+}
+.dl-clipboard-dismiss {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: transparent;
+  color: rgba(255,255,255,0.35);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  padding: 0;
+}
+.dl-clipboard-dismiss:hover {
+  background: rgba(255,255,255,0.07);
+  color: rgba(255,255,255,0.7);
+}
+
+/* Clipboard banner in empty state */
+.clipboard-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: rgba(124, 58, 237, 0.07);
+  border: 1px solid rgba(124, 58, 237, 0.35);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 24px;
+  animation: itemIn 0.25s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.clipboard-banner-url {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.8rem;
+  color: rgba(255,255,255,0.6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .dl-item-top {
   display: flex;
   align-items: center;
@@ -551,6 +622,48 @@ body {
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+}
+
+/* Mode toggle (Audio / Video) */
+.mode-toggle {
+  display: flex;
+  align-items: center;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.1);
+  background: rgba(255,255,255,0.04);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.mode-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  border: none;
+  background: transparent;
+  color: rgba(255,255,255,0.4);
+  font-size: 0.73rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+.mode-btn:hover:not(:disabled) {
+  background: rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.7);
+}
+.mode-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.mode-btn--active {
+  background: rgba(124,58,237,0.25);
+  color: #c4b5fd;
+}
+.mode-btn--active:hover:not(:disabled) {
+  background: rgba(124,58,237,0.35);
+  color: #ddd6fe;
 }
 
 /* Format selector */
