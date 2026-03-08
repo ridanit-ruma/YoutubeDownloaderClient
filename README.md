@@ -38,7 +38,7 @@ pnpm run build    # tsc -b && vite build  →  dist/
 Build from the **project root** (one level above this directory):
 
 ```bash
-podman build -f dockerfile/Dockerfile.client -t ytdlweb-client:latest .
+podman build -f Dockerfile -t ytdlweb-client:latest .
 ```
 
 Run:
