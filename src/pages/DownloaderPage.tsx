@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { FFmpeg } from '@ffmpeg/ffmpeg'
 import { toBlobURL } from '@ffmpeg/util'
 import { useAuth } from '../context/AuthContext'
-import { apiStream } from '../lib/api'
+import { apiStream, isUnauthorizedError } from '../lib/api'
 import type { ApiError } from '../lib/api'
 
 const APP_VERSION = '0.1.0'
@@ -85,8 +85,7 @@ function extractTitle(disposition: string | null): string {
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function DownloaderPage() {
-  const { claims, logout } = useAuth()
-  const { token } = useAuth()
+  const { claims, logout, token } = useAuth()
 
   const [inputUrl, setInputUrl] = useState('')
   const [items, setItems] = useState<DownloadItem[]>([])
@@ -119,8 +118,6 @@ export default function DownloaderPage() {
       try {
         // 1. Request stream from server
         const response = await apiStream(token, item.url)
-
-        // Extract title from Content-Disposition
         const title = extractTitle(response.headers.get('content-disposition'))
         if (title) patch(item.id, { label: title })
 
@@ -197,28 +194,30 @@ export default function DownloaderPage() {
 
         patch(item.id, { status: 'done', convertProgress: 100, label: title || item.label })
       } catch (err) {
+        // 401 Unauthorized → token expired or revoked; log out immediately
+        if (isUnauthorizedError(err)) {
+          logout()
+          return
+        }
         const msg =
           (err as ApiError).message ??
           (err instanceof Error ? err.message : 'Unknown error')
         patch(item.id, { status: 'error', errorMsg: msg })
       }
     },
-    [token, patch],
+    [token, patch, logout],
   )
 
   // ── Download All: idle + error 항목 순차 실행 ──────────────────────────────
   const handleDownloadAll = useCallback(() => {
-    setItems((prev) => {
-      const targets = prev.filter(
-        (it) => it.status === 'idle' || it.status === 'error',
-      )
-      targets.forEach((it) => {
-        // reset error items before re-queuing
-        handleDownload({ ...it, status: 'idle', downloadProgress: 0, convertProgress: 0, errorMsg: undefined })
-      })
-      return prev
+    const targets = items.filter(
+      (it) => it.status === 'idle' || it.status === 'error',
+    )
+    targets.forEach((it) => {
+      // error 항목은 status를 idle로 리셋한 복사본을 넘겨 재시도
+      handleDownload({ ...it, status: 'idle', downloadProgress: 0, convertProgress: 0, errorMsg: undefined })
     })
-  }, [handleDownload])
+  }, [items, handleDownload])
 
   // Pre-warm ffmpeg
   useEffect(() => {

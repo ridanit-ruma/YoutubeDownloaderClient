@@ -130,3 +130,10 @@ export async function apiStream(token: string, url: string): Promise<Response> {
   }
   return res
 }
+
+// ── Error helpers ─────────────────────────────────────────────────────────────
+
+/** Returns true if the error is a 401 Unauthorized response from the server. */
+export function isUnauthorizedError(err: unknown): boolean {
+  return (err as ApiError)?.status === 401
+}
