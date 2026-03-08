@@ -616,6 +616,44 @@ body {
   color: #4ade80;
 }
 
+/* Icon-only download button */
+.dl-btn--icon {
+  padding: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+}
+
+/* Spacer: pushes download+remove to right on mobile */
+.dl-actions-spacer {
+  display: none;
+}
+
+/* Remove (X) button */
+.dl-remove-btn {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: rgba(255,255,255,0.3);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.dl-remove-btn:hover {
+  background: rgba(239,68,68,0.15);
+  border-color: rgba(239,68,68,0.35);
+  color: #f87171;
+}
+
 /* Item actions group (right side of row) */
 .dl-item-actions {
   display: flex;
@@ -952,3 +990,96 @@ body {
   border-color: rgba(248,113,113,0.4);
 }
 .admin-delete-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── Mobile responsive ────────────────────────────────────────────────────── */
+@media (max-width: 600px) {
+  /* Layout */
+  .app-root { padding: 0 10px 60px; }
+  .app-inner { gap: 16px; }
+
+  /* Topbar */
+  .topbar { padding: 14px 0 0; }
+  .topbar-brand { font-size: 0.82rem; }
+  .topbar-user { display: none; }
+
+  /* Hero */
+  .hero { padding-top: 16px; gap: 6px; }
+  .hero-title { font-size: 1.5rem; }
+
+  /* Input row — textarea fills, Add button compact (not full width) */
+  .input-row { flex-direction: column; gap: 8px; align-items: stretch; }
+  .input-wrap { border-radius: 12px; flex: 1; }
+  .enter-btn {
+    align-self: flex-end;
+    padding: 10px 22px;
+    border-radius: 12px;
+    font-size: 0.85rem;
+  }
+
+  /* Download list */
+  .dl-list { gap: 8px; }
+  .dl-item { padding: 12px 12px; gap: 8px; border-radius: 12px; }
+
+  /* Top row: label full width on first line */
+  .dl-item-top { flex-wrap: wrap; gap: 6px; }
+  .dl-item-label-wrap { width: 100%; flex: none; min-width: 0; }
+
+  /* Actions row: controls left, download+remove pushed right */
+  .dl-item-actions {
+    width: 100%;
+    flex-wrap: nowrap;
+    gap: 6px;
+    align-items: center;
+  }
+
+  /* Mode toggle — icon only on mobile (hide text spans) */
+  .mode-toggle { flex-shrink: 0; }
+  .mode-btn {
+    padding: 6px 10px;
+    font-size: 0;        /* hide text */
+    gap: 0;
+  }
+  .mode-btn svg { width: 14px; height: 14px; }
+
+  /* Selectors — shrink but don't over-grow */
+  .format-select, .bitrate-select {
+    flex: 1;
+    min-width: 0;
+    max-width: 110px;
+    font-size: 0.75rem;
+    padding: 6px 6px;
+  }
+
+  /* Spacer: push download + remove to the right */
+  .dl-actions-spacer { display: block; flex: 1; }
+
+  /* Icon download button — keep compact */
+  .dl-btn--icon { width: 30px; height: 30px; flex-shrink: 0; }
+
+  /* Retry button — compact */
+  .dl-btn--retry { padding: 6px 10px; font-size: 0.78rem; flex-shrink: 0; }
+
+  /* Error message — truncate */
+  .dl-error-msg { font-size: 0.75rem; max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* Remove button */
+  .dl-remove-btn { flex-shrink: 0; }
+
+  /* Clipboard banner */
+  .clipboard-banner { flex-wrap: wrap; gap: 8px; }
+  .clipboard-banner-url { width: 100%; order: 3; }
+  .dl-clipboard-badge { order: 1; }
+  .dl-clipboard-dismiss { order: 2; margin-left: auto; }
+  .clipboard-banner .dl-btn--clipboard { flex: 1; text-align: center; order: 4; }
+  .dl-item--clipboard .dl-item-label-wrap { gap: 6px; }
+
+  /* Progress */
+  .dl-progress-row { gap: 8px; }
+
+  /* Download all row */
+  .dl-all-row { justify-content: flex-start; gap: 8px; }
+  .dl-all-btn { padding: 7px 14px; font-size: 0.78rem; }
+
+  /* Empty state */
+  .empty-state { padding: 32px 16px; }
+}

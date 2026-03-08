@@ -5,7 +5,7 @@ import { useAuth } from '../context/AuthContext'
 import { apiStream, apiStreamVideo, isUnauthorizedError } from '../lib/api'
 import type { ApiError } from '../lib/api'
 
-const APP_VERSION = '0.1.0'
+const APP_VERSION = '1.0.2'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -13,7 +13,7 @@ type DownloadStatus = 'idle' | 'downloading' | 'converting' | 'done' | 'error'
 type Bitrate = '64' | '128' | '192' | '320'
 type FormatId = 'mp3' | 'm4a' | 'ogg' | 'opus' | 'flac' | 'wav'
 type DownloadMode = 'audio' | 'video'
-type VideoHeight = 0 | 360 | 480 | 720 | 1080 | 1440 | 2160
+type VideoHeight = 360 | 480 | 720 | 1080 | 1440 | 2160
 
 interface FormatOption {
   id: FormatId
@@ -95,7 +95,6 @@ const VIDEO_HEIGHT_OPTIONS: { value: VideoHeight; label: string }[] = [
   { value: 720,  label: '720p' },
   { value: 480,  label: '480p' },
   { value: 360,  label: '360p' },
-  { value: 0,    label: 'Best' },
 ]
 
 interface DownloadItem {
@@ -213,7 +212,7 @@ export default function DownloaderPage() {
           mode: 'audio' as DownloadMode,
           format: 'mp3' as FormatId,
           bitrate: '192' as Bitrate,
-          videoHeight: 1080 as VideoHeight,
+          videoHeight: 2160 as VideoHeight,
         }))
       if (newItems.length === 0) return prev
       return [...prev, ...newItems]
@@ -490,6 +489,23 @@ export default function DownloaderPage() {
       }).catch(() => { /* permission denied or no text — ignore */ })
     }
 
+    // Also detect via paste event — works in Firefox without clipboard-read permission
+    const onPasteGlobal = (e: ClipboardEvent) => {
+      const active = document.activeElement
+      // Only intercept paste when NOT in an input/textarea (those handle paste themselves)
+      if (
+        active instanceof HTMLInputElement ||
+        active instanceof HTMLTextAreaElement ||
+        (active instanceof HTMLElement && active.isContentEditable)
+      ) return
+      const text = (e.clipboardData ?? (window as unknown as { clipboardData?: DataTransfer }).clipboardData)?.getData('text/plain') ?? ''
+      const urls = parseUrls(text.trim())
+      if (urls.length > 0) {
+        const url = urls[0]
+        setClipboardUrl((prev) => (prev === url ? prev : url))
+      }
+    }
+
     // Check on focus (user switches back to the tab)
     window.addEventListener('focus', check)
     // Also check when tab becomes visible (e.g. switching from another tab)
@@ -497,6 +513,8 @@ export default function DownloaderPage() {
     document.addEventListener('visibilitychange', onVisibility)
     // Also check when mouse enters the page (catches cases where focus event doesn't fire)
     document.addEventListener('pointerenter', check, { once: false, capture: false })
+    // Firefox-compatible: detect paste anywhere on the page
+    window.addEventListener('paste', onPasteGlobal)
     // Check once on mount
     check()
 
@@ -504,6 +522,7 @@ export default function DownloaderPage() {
       window.removeEventListener('focus', check)
       document.removeEventListener('visibilitychange', onVisibility)
       document.removeEventListener('pointerenter', check)
+      window.removeEventListener('paste', onPasteGlobal)
     }
   }, [])
 
@@ -516,6 +535,10 @@ export default function DownloaderPage() {
     addUrls(clipboardUrl)
     setClipboardUrl(null)
   }, [clipboardUrl, addUrls])
+
+  const handleRemove = useCallback((id: string) => {
+    setItems((prev) => prev.filter((it) => it.id !== id))
+  }, [])
 
   const idleCount   = items.filter((it) => it.status === 'idle').length
   const failedCount = items.filter((it) => it.status === 'error').length
@@ -583,7 +606,7 @@ export default function DownloaderPage() {
             {idleCount > 1 && (
               <button className="dl-all-btn" onClick={handleDownloadAll}>
                 <DownloadAllIcon />
-                Download All ({idleCount})
+                {idleCount}
               </button>
             )}
             {failedCount > 0 && (
@@ -621,6 +644,7 @@ export default function DownloaderPage() {
                 key={item.id}
                 item={item}
                 onDownload={handleDownload}
+                onRemove={handleRemove}
                 onModeChange={(id, mode) => patch(id, { mode })}
                 onFormatChange={(id, format) => patch(id, { format })}
                 onBitrateChange={(id, bitrate) => patch(id, { bitrate })}
@@ -660,6 +684,7 @@ export default function DownloaderPage() {
 function DownloadRow({
   item,
   onDownload,
+  onRemove,
   onModeChange,
   onFormatChange,
   onBitrateChange,
@@ -667,6 +692,7 @@ function DownloadRow({
 }: {
   item: DownloadItem
   onDownload: (item: DownloadItem) => void
+  onRemove: (id: string) => void
   onModeChange: (id: string, mode: DownloadMode) => void
   onFormatChange: (id: string, format: FormatId) => void
   onBitrateChange: (id: string, bitrate: Bitrate) => void
@@ -783,22 +809,27 @@ function DownloadRow({
 
           {/* Download / status button */}
           {!isError && (
-            <button
-              className={`dl-btn ${isDone ? 'dl-btn--done' : ''}`}
-              onClick={() => onDownload(item)}
-              disabled={isActive || isDone}
-            >
-              {isDone
-                ? 'Done'
-                : isActive
-                  ? status === 'downloading' ? 'Streaming…' : 'Converting…'
-                  : 'Download'}
-            </button>
+            <>
+              <span className="dl-actions-spacer" />
+              <button
+                className={`dl-btn dl-btn--icon ${isDone ? 'dl-btn--done' : ''}`}
+                onClick={() => onDownload(item)}
+                disabled={isActive || isDone}
+                title={isDone ? 'Done' : isActive ? (status === 'downloading' ? 'Streaming…' : 'Converting…') : 'Download'}
+              >
+                {isDone
+                  ? <CheckIcon />
+                  : isActive
+                    ? <PulseIcon color={status === 'downloading' ? '#60a5fa' : '#a78bfa'} />
+                    : <DownloadIcon />}
+              </button>
+            </>
           )}
 
           {/* Error: message + Retry */}
           {isError && (
             <>
+              <span className="dl-actions-spacer" />
               <span className="dl-error-msg" title={errorMsg}>
                 <ErrorIcon />
                 Download failed
@@ -811,6 +842,17 @@ function DownloadRow({
                 Retry
               </button>
             </>
+          )}
+
+          {/* Remove button */}
+          {!isActive && (
+            <button
+              className="dl-remove-btn"
+              onClick={() => onRemove(item.id)}
+              title="Remove"
+            >
+              <DismissIcon />
+            </button>
           )}
         </div>
       </div>
@@ -956,6 +998,16 @@ function DismissIcon() {
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
       <line x1="18" y1="6" x2="6" y2="18"/>
       <line x1="6" y1="6" x2="18" y2="18"/>
+    </svg>
+  )
+}
+
+function DownloadIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+      <polyline points="7 10 12 15 17 10"/>
+      <line x1="12" y1="15" x2="12" y2="3"/>
     </svg>
   )
 }
