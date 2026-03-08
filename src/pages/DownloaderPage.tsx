@@ -10,6 +10,14 @@ const APP_VERSION = '0.1.0'
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type DownloadStatus = 'idle' | 'downloading' | 'converting' | 'done' | 'error'
+type Bitrate = '64' | '128' | '192' | '320'
+
+const BITRATE_OPTIONS: { value: Bitrate; label: string }[] = [
+  { value: '64',  label: '64 kbps' },
+  { value: '128', label: '128 kbps' },
+  { value: '192', label: '192 kbps' },
+  { value: '320', label: '320 kbps' },
+]
 
 interface DownloadItem {
   id: string
@@ -18,6 +26,7 @@ interface DownloadItem {
   status: DownloadStatus
   downloadProgress: number  // 0–100 streaming from server
   convertProgress: number   // 0–100 ffmpeg conversion
+  bitrate: Bitrate
   errorMsg?: string
 }
 
@@ -162,6 +171,7 @@ export default function DownloaderPage() {
           status: 'idle' as DownloadStatus,
           downloadProgress: 0,
           convertProgress: 0,
+          bitrate: '192' as Bitrate,
         }))
       if (newItems.length === 0) return prev
       return [...prev, ...newItems]
@@ -223,7 +233,7 @@ export default function DownloaderPage() {
         let off = 0
         for (const c of chunks) { buf.set(c, off); off += c.byteLength }
 
-        // 4. FFmpeg convert → MP3 192k
+        // 4. FFmpeg convert → MP3 at selected bitrate
         const ff = await acquireFFmpeg()
         const inputName = `in_${item.id}`
         const outputName = `out_${item.id}.mp3`
@@ -233,14 +243,13 @@ export default function DownloaderPage() {
         const onProg = ({ progress }: { progress: number }) => {
           if (progress >= 0 && progress <= 1) {
             // Guard: don't overwrite a completed item's progress with a new conversion's events.
-            // This can happen because FFmpeg is a global singleton shared across all items.
             if (!activeIds.current.has(item.id)) return
             patch(item.id, { convertProgress: Math.round(progress * 100) })
           }
         }
         ff.on('progress', onProg)
 
-        await ff.exec(['-i', inputName, '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-f', 'mp3', outputName])
+        await ff.exec(['-i', inputName, '-vn', '-c:a', 'libmp3lame', '-b:a', `${item.bitrate}k`, '-f', 'mp3', outputName])
         ff.off('progress', onProg)
 
         // 5. Download blob
@@ -282,15 +291,18 @@ export default function DownloaderPage() {
     [token, patch, logout],
   )
 
-  // ── Download All: idle + error 항목 순차 실행 ──────────────────────────────
+  // ── Download All: idle 항목 전부 ──────────────────────────────────────────
   const handleDownloadAll = useCallback(() => {
-    const targets = items.filter(
-      (it) => it.status === 'idle' || it.status === 'error',
-    )
-    targets.forEach((it) => {
-      // error 항목은 status를 idle로 리셋한 복사본을 넘겨 재시도
+    const targets = items.filter((it) => it.status === 'idle')
+    targets.forEach((it) => handleDownload(it))
+  }, [items, handleDownload])
+
+  // ── Retry All Failed: error 항목 전부 재시도 ─────────────────────────────
+  const handleRetryAllFailed = useCallback(() => {
+    const targets = items.filter((it) => it.status === 'error')
+    targets.forEach((it) =>
       handleDownload({ ...it, status: 'idle', downloadProgress: 0, convertProgress: 0, errorMsg: undefined })
-    })
+    )
   }, [items, handleDownload])
 
   // Pre-warm ffmpeg
@@ -316,11 +328,9 @@ export default function DownloaderPage() {
       navigator.clipboard.readText().then((text) => {
         const trimmed = text.trim()
         if (!trimmed) return
-        // 인풋에 넣고 곧바로 addUrls 트리거
         setInputUrl(trimmed)
         addUrls(trimmed)
       }).catch(() => {
-        // clipboard 권한 없을 경우 input에 포커스만 이동
         inputRef.current?.focus()
       })
     }
@@ -329,9 +339,8 @@ export default function DownloaderPage() {
   }, [addUrls])
 
   // ── 버튼 표시 조건 ─────────────────────────────────────────────────────────
-  const downloadableCount = items.filter(
-    (it) => it.status === 'idle' || it.status === 'error',
-  ).length
+  const idleCount   = items.filter((it) => it.status === 'idle').length
+  const failedCount = items.filter((it) => it.status === 'error').length
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
@@ -403,13 +412,21 @@ export default function DownloaderPage() {
           </button>
         </div>
 
-        {/* ── Download All 버튼 ── */}
-        {downloadableCount > 1 && (
+        {/* ── Action buttons row ── */}
+        {(idleCount > 1 || failedCount > 0) && (
           <div className="dl-all-row">
-            <button className="dl-all-btn" onClick={handleDownloadAll}>
-              <DownloadAllIcon />
-              Download All ({downloadableCount})
-            </button>
+            {idleCount > 1 && (
+              <button className="dl-all-btn" onClick={handleDownloadAll}>
+                <DownloadAllIcon />
+                Download All ({idleCount})
+              </button>
+            )}
+            {failedCount > 0 && (
+              <button className="dl-all-btn dl-all-btn--retry" onClick={handleRetryAllFailed}>
+                <RetryIcon />
+                Retry All Failed ({failedCount})
+              </button>
+            )}
           </div>
         )}
 
@@ -417,7 +434,12 @@ export default function DownloaderPage() {
         {items.length > 0 && (
           <ul className="dl-list">
             {items.map((item) => (
-              <DownloadRow key={item.id} item={item} onDownload={handleDownload} />
+              <DownloadRow
+                key={item.id}
+                item={item}
+                onDownload={handleDownload}
+                onBitrateChange={(id, bitrate) => patch(id, { bitrate })}
+              />
             ))}
           </ul>
         )}
@@ -440,14 +462,20 @@ export default function DownloaderPage() {
 function DownloadRow({
   item,
   onDownload,
+  onBitrateChange,
 }: {
   item: DownloadItem
   onDownload: (item: DownloadItem) => void
+  onBitrateChange: (id: string, bitrate: Bitrate) => void
 }) {
-  const { status, downloadProgress, convertProgress, label, errorMsg } = item
+  const { status, downloadProgress, convertProgress, label, errorMsg, bitrate } = item
   const isActive = status === 'downloading' || status === 'converting'
   const isDone = status === 'done'
   const isError = status === 'error'
+  const isIdle = status === 'idle'
+
+  // Bitrate selector는 idle 또는 error 상태에서만 활성화
+  const canChangeBitrate = isIdle || isError
 
   // Unified display progress
   // downloading: 0–50%, converting: 50–100%
@@ -467,11 +495,24 @@ function DownloadRow({
           {status === 'converting' && <PulseIcon color="#a78bfa" />}
           {isDone && <CheckIcon />}
           {isError && <ErrorIcon />}
-          {status === 'idle' && <IdleIcon />}
+          {isIdle && <IdleIcon />}
           <span className="dl-item-label" title={label}>{label}</span>
         </div>
 
         <div className="dl-item-actions">
+          {/* 음질 선택 */}
+          <select
+            className="bitrate-select"
+            value={bitrate}
+            disabled={!canChangeBitrate}
+            onChange={(e) => onBitrateChange(item.id, e.target.value as Bitrate)}
+            title="Audio quality"
+          >
+            {BITRATE_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+
           {/* 일반 Download / 진행 중 / Done 버튼 */}
           {!isError && (
             <button
@@ -520,7 +561,7 @@ function DownloadRow({
       {/* Phase label */}
       {isActive && (
         <p className="dl-phase">
-          {status === 'downloading' ? 'Streaming from server…' : 'Converting to MP3 (192kbps)…'}
+          {status === 'downloading' ? 'Streaming from server…' : `Converting to MP3 (${bitrate}kbps)…`}
         </p>
       )}
     </li>

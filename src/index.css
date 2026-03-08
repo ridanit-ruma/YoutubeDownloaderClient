@@ -423,6 +423,7 @@ body {
   width: 100%;
   display: flex;
   justify-content: flex-end;
+  gap: 8px;
 }
 
 .dl-all-btn {
@@ -446,6 +447,18 @@ body {
   transform: translateY(-1px);
 }
 .dl-all-btn:active { transform: translateY(0); }
+
+/* Retry All Failed variant */
+.dl-all-btn--retry {
+  border-color: rgba(248,113,113,0.35);
+  background: rgba(248,113,113,0.08);
+  color: rgba(252,165,165,0.9);
+}
+.dl-all-btn--retry:hover {
+  background: rgba(248,113,113,0.18);
+  border-color: rgba(248,113,113,0.55);
+  color: #fca5a5;
+}
 
 /* Download list */
 .dl-list {
@@ -538,6 +551,41 @@ body {
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+}
+
+/* Bitrate selector */
+.bitrate-select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.1);
+  background: rgba(255,255,255,0.05);
+  color: rgba(255,255,255,0.55);
+  font-size: 0.75rem;
+  font-weight: 500;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+.bitrate-select:hover:not(:disabled) {
+  border-color: rgba(167,139,250,0.4);
+  background: rgba(124,58,237,0.1);
+  color: rgba(196,181,253,0.9);
+}
+.bitrate-select:focus:not(:disabled) {
+  border-color: rgba(124,58,237,0.5);
+  background: rgba(124,58,237,0.12);
+  color: #c4b5fd;
+}
+.bitrate-select:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+.bitrate-select option {
+  background: #1e1b2e;
+  color: #e2e0ff;
 }
 
 /* Error inline */
