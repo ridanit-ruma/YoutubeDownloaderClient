@@ -96,8 +96,8 @@ export default function DownloaderPage() {
     setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...delta } : it)))
   }, [])
 
-  const addUrl = useCallback(() => {
-    const raw = inputUrl.trim()
+  const addUrl = useCallback((urlOverride?: string) => {
+    const raw = (urlOverride ?? inputUrl).trim()
     if (!raw) return
     setItems((prev) => [
       ...prev,
@@ -206,10 +206,60 @@ export default function DownloaderPage() {
     [token, patch],
   )
 
+  // ── Download All: idle + error 항목 순차 실행 ──────────────────────────────
+  const handleDownloadAll = useCallback(() => {
+    setItems((prev) => {
+      const targets = prev.filter(
+        (it) => it.status === 'idle' || it.status === 'error',
+      )
+      targets.forEach((it) => {
+        // reset error items before re-queuing
+        handleDownload({ ...it, status: 'idle', downloadProgress: 0, convertProgress: 0, errorMsg: undefined })
+      })
+      return prev
+    })
+  }, [handleDownload])
+
   // Pre-warm ffmpeg
   useEffect(() => {
     getFFmpeg().catch(() => {})
   }, [])
+
+  // ── Ctrl+V 전역 감지: 포커스 없어도 URL 붙여넣기 ─────────────────────────
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      // Ctrl+V (Windows/Linux) or Cmd+V (Mac)
+      if (!(e.ctrlKey || e.metaKey) || e.key !== 'v') return
+
+      // input/textarea에 포커스가 있으면 기본 동작에 맡김
+      const active = document.activeElement
+      if (
+        active instanceof HTMLInputElement ||
+        active instanceof HTMLTextAreaElement ||
+        (active instanceof HTMLElement && active.isContentEditable)
+      ) return
+
+      e.preventDefault()
+      navigator.clipboard.readText().then((text) => {
+        const url = text.trim()
+        if (!url) return
+        // 인풋에 넣고 곧바로 addUrl 트리거
+        setInputUrl(url)
+        // 다음 렌더 후 addUrl이 최신 inputUrl을 볼 수 있도록 urlOverride 직접 전달
+        addUrl(url)
+      }).catch(() => {
+        // clipboard 권한 없을 경우 input에 포커스만 이동
+        inputRef.current?.focus()
+      })
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [addUrl])
+
+  // ── 버튼 표시 조건 ─────────────────────────────────────────────────────────
+  const downloadableCount = items.filter(
+    (it) => it.status === 'idle' || it.status === 'error',
+  ).length
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
@@ -261,12 +311,22 @@ export default function DownloaderPage() {
           </div>
           <button
             className="enter-btn"
-            onClick={addUrl}
+            onClick={() => addUrl()}
             disabled={!inputUrl.trim()}
           >
             Add
           </button>
         </div>
+
+        {/* ── Download All 버튼 ── */}
+        {downloadableCount > 1 && (
+          <div className="dl-all-row">
+            <button className="dl-all-btn" onClick={handleDownloadAll}>
+              <DownloadAllIcon />
+              Download All ({downloadableCount})
+            </button>
+          </div>
+        )}
 
         {/* ── List ── */}
         {items.length > 0 && (
@@ -282,6 +342,7 @@ export default function DownloaderPage() {
           <div className="empty-state">
             <MusicIcon />
             <p>Paste a YouTube link above and press <kbd>Enter</kbd></p>
+            <p className="empty-hint">Tip: press <kbd>Ctrl+V</kbd> anywhere to add a URL instantly</p>
           </div>
         )}
       </div>
@@ -298,7 +359,7 @@ function DownloadRow({
   item: DownloadItem
   onDownload: (item: DownloadItem) => void
 }) {
-  const { status, downloadProgress, convertProgress, label } = item
+  const { status, downloadProgress, convertProgress, label, errorMsg } = item
   const isActive = status === 'downloading' || status === 'converting'
   const isDone = status === 'done'
   const isError = status === 'error'
@@ -325,22 +386,35 @@ function DownloadRow({
           <span className="dl-item-label" title={label}>{label}</span>
         </div>
 
-        {!isError && (
-          <button
-            className={`dl-btn ${isDone ? 'dl-btn--done' : ''}`}
-            onClick={() => onDownload(item)}
-            disabled={isActive || isDone}
-          >
-            {isDone ? 'Done' : isActive ? (status === 'downloading' ? 'Streaming…' : 'Converting…') : 'Download'}
-          </button>
-        )}
+        <div className="dl-item-actions">
+          {/* 일반 Download / 진행 중 / Done 버튼 */}
+          {!isError && (
+            <button
+              className={`dl-btn ${isDone ? 'dl-btn--done' : ''}`}
+              onClick={() => onDownload(item)}
+              disabled={isActive || isDone}
+            >
+              {isDone ? 'Done' : isActive ? (status === 'downloading' ? 'Streaming…' : 'Converting…') : 'Download'}
+            </button>
+          )}
 
-        {isError && (
-          <span className="dl-error-msg">
-            <ErrorIcon />
-            Download failed
-          </span>
-        )}
+          {/* 에러 시: 메시지 + Retry 버튼 */}
+          {isError && (
+            <>
+              <span className="dl-error-msg" title={errorMsg}>
+                <ErrorIcon />
+                Download failed
+              </span>
+              <button
+                className="dl-btn dl-btn--retry"
+                onClick={() => onDownload({ ...item, status: 'idle', downloadProgress: 0, convertProgress: 0, errorMsg: undefined })}
+              >
+                <RetryIcon />
+                Retry
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Progress bar — shown while active or done */}
@@ -437,5 +511,24 @@ function IdleIcon() {
 function PulseIcon({ color }: { color: string }) {
   return (
     <span className="pulse-dot" style={{ background: color }} />
+  )
+}
+
+function RetryIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="1 4 1 10 7 10"/>
+      <path d="M3.51 15a9 9 0 1 0 .49-4"/>
+    </svg>
+  )
+}
+
+function DownloadAllIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+      <polyline points="7 10 12 15 17 10"/>
+      <line x1="12" y1="15" x2="12" y2="3"/>
+    </svg>
   )
 }
