@@ -1,0 +1,86 @@
+name: Build and Deploy Client
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  # ── Job 1: 이미지 빌드 후 ghcr.io push ──────────────────────────────────────
+  build-and-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write  # ghcr.io push에 필요
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.sha_tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: meta
+        run: |
+          SHA_TAG="sha-$(echo ${{ github.sha }} | cut -c1-7)"
+          echo "sha_tag=${SHA_TAG}" >> $GITHUB_OUTPUT
+          echo "Image tag: ${SHA_TAG}"
+
+      - name: Login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ghcr.io/ridanit-ruma/youtubedownloaderclient:latest
+            ghcr.io/ridanit-ruma/youtubedownloaderclient:${{ steps.meta.outputs.sha_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Job 2: K8s 배포 ──────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to Kubernetes
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_BASE64 }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Apply namespace and manifests
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/deployment.yaml -n ytdlweb
+          kubectl apply -f k8s/service.yaml -n ytdlweb
+
+      - name: Update image to new SHA tag
+        run: |
+          kubectl set image deployment/client \
+            client=ghcr.io/ridanit-ruma/youtubedownloaderclient:${{ needs.build-and-push.outputs.image_tag }} \
+            -n ytdlweb
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/client -n ytdlweb --timeout=120s
