@@ -5,7 +5,7 @@ import { useAuth } from '../context/AuthContext'
 import { apiStream, apiStreamVideo, isUnauthorizedError } from '../lib/api'
 import type { ApiError } from '../lib/api'
 
-const APP_VERSION = '1.0.2'
+const APP_VERSION = '1.2.1'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -13,7 +13,7 @@ type DownloadStatus = 'idle' | 'downloading' | 'converting' | 'done' | 'error'
 type Bitrate = '64' | '128' | '192' | '320'
 type FormatId = 'mp3' | 'm4a' | 'ogg' | 'opus' | 'flac' | 'wav'
 type DownloadMode = 'audio' | 'video'
-type VideoHeight = 360 | 480 | 720 | 1080 | 1440 | 2160
+type VideoHeight = 0 | 360 | 480 | 720 | 1080 | 1440 | 2160
 
 interface FormatOption {
   id: FormatId
@@ -89,6 +89,7 @@ const BITRATE_OPTIONS: { value: Bitrate; label: string }[] = [
 ]
 
 const VIDEO_HEIGHT_OPTIONS: { value: VideoHeight; label: string }[] = [
+  { value: 0,    label: 'Best' },
   { value: 2160, label: '4K (2160p)' },
   { value: 1440, label: '1440p' },
   { value: 1080, label: '1080p' },
@@ -157,8 +158,12 @@ function uid(): string {
   return Math.random().toString(36).slice(2, 10)
 }
 
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i
+
 function sanitiseFilename(name: string): string {
-  return name.replace(/[\\/:*?"<>|]/g, '_').trim() || 'audio'
+  const cleaned = name.replace(/[\\/:*?"<>|]/g, '_').trim() || 'audio'
+  // Avoid Windows reserved device names (nul, con, prn, aux, com1-9, lpt1-9)
+  return WINDOWS_RESERVED.test(cleaned) ? `_${cleaned}` : cleaned
 }
 
 function extractTitle(disposition: string | null): string {
@@ -212,7 +217,7 @@ export default function DownloaderPage() {
           mode: 'audio' as DownloadMode,
           format: 'mp3' as FormatId,
           bitrate: '192' as Bitrate,
-          videoHeight: 2160 as VideoHeight,
+          videoHeight: 0 as VideoHeight,
         }))
       if (newItems.length === 0) return prev
       return [...prev, ...newItems]
