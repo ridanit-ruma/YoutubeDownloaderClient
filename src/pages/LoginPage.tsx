@@ -48,7 +48,7 @@ export default function LoginPage() {
           <div className="login-icon">
             <YoutubeIcon />
           </div>
-          <h1 className="login-title">YouTube Mp3</h1>
+          <h1 className="login-title">YTDL WEB</h1>
           <p className="login-subtitle">Sign in to start downloading</p>
         </div>
 
